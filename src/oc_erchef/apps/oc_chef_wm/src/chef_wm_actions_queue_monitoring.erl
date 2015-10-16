@@ -87,7 +87,7 @@
 -define(SERVER, ?MODULE).
 
 
--record(state, {
+-record(queue_monitor_state, {
                 % has the max_length of the queue been reached?
                 queue_at_capacity = false,
                 % timer to check max and current queue length
@@ -196,44 +196,44 @@ init([]) ->
     % used to catch worker msgs
     process_flag(trap_exit, true),
     TRef = start_update_timer(),
-    {ok, #state{timer=TRef, worker_process = undefined}}.
+    {ok, #queue_monitor_state{timer=TRef, worker_process = undefined}}.
 
 
 %%-------------------------------------------------------------
 %% CALLS
-handle_call(is_queue_at_capacity, _From, #state{queue_at_capacity =
+handle_call(is_queue_at_capacity, _From, #queue_monitor_state{queue_at_capacity =
                                                 QueueAtCapacity} = State) ->
     {reply, QueueAtCapacity, State};
 
 handle_call({override_queue_at_capacity, AtCapacity}, _From, State) ->
     lager:info("Manually setting Queue Monitor queue_at_capacity ~p", [AtCapacity]),
-    {reply, ok, State#state{queue_at_capacity = AtCapacity}};
+    {reply, ok, State#queue_monitor_state{queue_at_capacity = AtCapacity}};
 handle_call(status, _From, State) ->
     % return a term to be converted to JSON
-    Stats = [{queue_at_capacity,State#state.queue_at_capacity},
-             {dropped_since_last_check, State#state.dropped_since_last_check},
-             {max_length, State#state.max_length},
-             {last_recorded_length, State#state.last_recorded_length},
-             {total_dropped, State#state.total_dropped}],
+    Stats = [{queue_at_capacity,State#queue_monitor_state.queue_at_capacity},
+             {dropped_since_last_check, State#queue_monitor_state.dropped_since_last_check},
+             {max_length, State#queue_monitor_state.max_length},
+             {last_recorded_length, State#queue_monitor_state.last_recorded_length},
+             {total_dropped, State#queue_monitor_state.total_dropped}],
     {reply, Stats, State};
-handle_call(sync_check_current_state, From, #state{sync_response_process = undefined} = State) ->
+handle_call(sync_check_current_state, From, #queue_monitor_state{sync_response_process = undefined} = State) ->
      self() ! status_ping,
-     {noreply, State#state{sync_response_process = From}};
+     {noreply, State#queue_monitor_state{sync_response_process = From}};
 handle_call(stop, _From, State) ->
     lager:info("Stopping Queue Monitor"),
     {stop,normal,ok,State};
-handle_call(start_timer, _From, #state{timer = undefined} = State) ->
+handle_call(start_timer, _From, #queue_monitor_state{timer = undefined} = State) ->
     TRef = start_update_timer(),
-    {reply, ok, State#state{timer = TRef}};
+    {reply, ok, State#queue_monitor_state{timer = TRef}};
 handle_call(start_timer, _From, State) ->
     lager:info("Queue Monitoring timer already started"),
     {reply, ok, State};
-handle_call(stop_timer, _From, #state{timer = undefined} = State) ->
+handle_call(stop_timer, _From, #queue_monitor_state{timer = undefined} = State) ->
     lager:info("Queue Monitoring timer already stopped"),
     {reply, ok, State};
-handle_call(stop_timer, _From, #state{timer = Timer} = State) ->
+handle_call(stop_timer, _From, #queue_monitor_state{timer = Timer} = State) ->
     {ok, cancel} = timer:cancel(Timer),
-    {reply, ok, State#state{timer = undefined}};
+    {reply, ok, State#queue_monitor_state{timer = undefined}};
 handle_call(Request, _From, State) ->
     lager:debug("Unknown request: ~p", [Request]),
     {reply, ignored, State}.
@@ -241,9 +241,9 @@ handle_call(Request, _From, State) ->
 
 %%-------------------------------------------------------------
 %% CASTS
-handle_cast(message_dropped, #state{total_dropped = TotalDropped,
+handle_cast(message_dropped, #queue_monitor_state{total_dropped = TotalDropped,
                                     dropped_since_last_check = Dropped} = State) ->
-    {noreply, State#state{total_dropped = TotalDropped + 1,
+    {noreply, State#queue_monitor_state{total_dropped = TotalDropped + 1,
                           dropped_since_last_check = Dropped + 1}};
 handle_cast(Msg, State) ->
     lager:debug("Unknown cast: ~p", [Msg]),
@@ -253,8 +253,8 @@ handle_cast(Msg, State) ->
 %%-------------------------------------------------------------
 %% INFO
 handle_info(reset_dropped_since_last_check, State) ->
-    {noreply,State#state{dropped_since_last_check = 0}};
-handle_info({'EXIT', From, Reason}, #state{worker_process = WorkerPid,
+    {noreply,State#queue_monitor_state{dropped_since_last_check = 0}};
+handle_info({'EXIT', From, Reason}, #queue_monitor_state{worker_process = WorkerPid,
                                            sync_response_process = SyncPid} = State) ->
     % Check to see if the EXIT came from our worker
     case From == WorkerPid of
@@ -265,7 +265,7 @@ handle_info({'EXIT', From, Reason}, #state{worker_process = WorkerPid,
                   Pid -> gen_server:reply(Pid, ok)
               end,
               % clear the worker_process, allowing for future workers to start
-              {noreply, State#state{worker_process = undefined,
+              {noreply, State#queue_monitor_state{worker_process = undefined,
                                     sync_response_process = undefined}};
         false ->
             lager:warning("Unknown process exit detected in Queue Monitor ~p ~p", [From, Reason]),
@@ -274,7 +274,7 @@ handle_info({'EXIT', From, Reason}, #state{worker_process = WorkerPid,
 handle_info({MaxLength, N, AtCap}, State) ->
     % a successful check of the max queue length and current queue length
     % just update the state and carry on
-    {noreply,State#state{
+    {noreply,State#queue_monitor_state{
                max_length = MaxLength,
                last_recorded_length = N,
                queue_at_capacity = AtCap,
@@ -282,11 +282,11 @@ handle_info({MaxLength, N, AtCap}, State) ->
               }};
 % guard against starting more than one worker process via the
 % match to worker_process = undefined.
-handle_info(status_ping, #state{worker_process = undefined,
+handle_info(status_ping, #queue_monitor_state{worker_process = undefined,
                                 dropped_since_last_check = Dropped} = State) ->
     ParentPid = self(),
     Pid = spawn_link(fun () -> check_current_queue_state(ParentPid, Dropped) end),
-    {noreply, State#state{worker_process=Pid}};
+    {noreply, State#queue_monitor_state{worker_process=Pid}};
 handle_info(status_ping, State) ->
     lager:info("Queue monitor check still running, skipping next check"),
     {noreply, State};
@@ -294,9 +294,9 @@ handle_info(Info, State) ->
     lager:debug("Unknown info: ~p", [Info]),
     {noreply, State}.
 
-terminate(_Reason, #state{timer=undefined}) ->
+terminate(_Reason, #queue_monitor_state{timer=undefined}) ->
     ok;
-terminate(_Reason, #state{timer=Timer}) ->
+terminate(_Reason, #queue_monitor_state{timer=Timer}) ->
     {ok, cancel} = timer:cancel(Timer),
     ok.
 
@@ -395,8 +395,9 @@ get_max_length() ->
         {ok, "404", _, _} ->
             lager:info("RabbitMQ max-length policy not set"),
             undefined;
-        Resp -> lager:error("Unknown response from RabbitMQ management console: ~p", [Resp]),
-                 undefined
+        Resp ->
+            lager:error("Unknown response from RabbitMQ management console: ~p", [Resp]),
+            undefined
 
     end.
 
@@ -416,7 +417,7 @@ get_current_length() ->
             undefined;
         Resp ->
             lager:error("Unknown response from RabbitMQ management console: ~p", [Resp]),
-                 undefined
+            undefined
     end.
 
 % NOTE: oc_httpc:responseBody() :: string() | {file, filename()}.
