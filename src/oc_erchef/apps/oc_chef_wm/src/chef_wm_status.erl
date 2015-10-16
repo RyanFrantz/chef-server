@@ -68,7 +68,7 @@ check_health() ->
                 ],
 
     StatList =
-      case envy:get(oc_chef_wm, rabbitmq_queue_length_monitor_enabled, boolean) of
+      case envy:get(oc_chef_wm, rabbitmq_queue_length_monitor_enabled, false, boolean) of
         false -> % chef_wm_actions_queue_monitoring isn't running, skip it
                  StatList0;
         true -> AnalyticsQ = chef_wm_actions_queue_monitoring:status(),
