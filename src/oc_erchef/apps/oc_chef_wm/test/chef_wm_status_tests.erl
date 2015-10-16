@@ -28,6 +28,13 @@
                         {inflight, 0}, {avail_workers, 10},
                         {start_size, 10}]).
 
+-define(ANALYTICS_STATUS,{[
+  {<<"queue_at_capacity">>, false},
+  {<<"dropped_since_last_check">>, 0},
+  {<<"max_length">>, 0},
+  {<<"last_recorded_length">>, 0},
+  {<<"total_dropped">>, 0}]}).
+
 -define(PING_TIMEOUT, 50).
 -define(SLOW_CHECK_SLEEP, 100).
 
@@ -124,6 +131,40 @@ check_health_mod_fails(BadMod, How) ->
               {Status, _Json} = chef_wm_status:check_health(),
               ?assertEqual(fail, Status)
       end}]}.
+
+check_health_with_rabbit_monitoring_test_() ->
+  {setup,
+    fun() ->
+      setup_env(),
+      application:set_env(oc_chef_wm, rabbitmq_queue_length_monitor_enabled, true),
+      {ok, _QMPid} = chef_wm_actions_queue_monitoring:start_link(),
+      [ begin
+          meck:new(Mod),
+          meck:expect(Mod, ping, fun() -> pong end)
+        end || Mod <- ?CHECK_MODS ],
+          meck:new(chef_keygen_cache),
+          meck:expect(chef_keygen_cache, status_for_json, fun() -> ?KEYGEN_STATUS end)
+    end,
+    fun(_) ->
+          [ meck:unload(Mod) || Mod <- ?CHECK_MODS ],
+          meck:unload(chef_keygen_cache),
+          % Set monitoring back off in case tests run out of order
+          application:set_env(oc_chef_wm, rabbitmq_queue_length_monitor_enabled, false),
+          catch(chef_wm_actions_queue_monitoring:stop()),
+          cleanup_env()
+    end,
+    [
+    fun() ->
+          {Status, Json} = chef_wm_status:check_health(),
+          ?assertEqual(pong, Status),
+          Ejson = chef_json:decode(Json),
+          ?assertEqual(<<"pong">>, ej:get({<<"status">>}, Ejson)),
+          [ ?assertEqual(<<"pong">>, ej:get({"upstreams", a2b(Mod)}, Ejson))
+              || Mod <- ?CHECK_MODS ],
+          ?assertEqual(?ANALYTICS_STATUS, ej:get({<<"analytics_queue">>}, Ejson))
+
+    end]}.
+
 
 a2b(A) ->
     erlang:atom_to_binary(A, utf8).

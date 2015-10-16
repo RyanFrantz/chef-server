@@ -311,7 +311,7 @@ code_change(_OldVsn, State, _Extra) ->
 % start the timer that updates stats
 -spec start_update_timer() -> timer:tref().
 start_update_timer() ->
-    Interval = envy:get(oc_chef_wm, rabbitmq_queue_length_monitor_millis, pos_integer),
+    Interval = envy:get(oc_chef_wm, rabbitmq_queue_length_monitor_millis, 60000, pos_integer),
     {ok, TRef} = timer:send_interval(Interval, status_ping),
     TRef.
 
