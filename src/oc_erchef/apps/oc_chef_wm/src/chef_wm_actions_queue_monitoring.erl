@@ -4,7 +4,7 @@
 %%% @doc
 %%% monitor RabbitMQ length of analytics queues
 %%% @end
-%% Copyright 2011-2015 Chef Software, Inc. All Rights Reserved.
+%% Copyright 2015 Chef Software, Inc.
 %%
 %% This file is provided to you under the Apache License,
 %% Version 2.0 (the "License"); you may not use this file
@@ -73,9 +73,6 @@
          status/0,
          is_queue_at_capacity/0,
          message_dropped/0,
-         create_pool/0,
-         delete_pool/0,
-         get_pool_configs/0,
          override_queue_at_capacity/1,
          sync_check_current_state/0,
          start_timer/0,
@@ -85,6 +82,8 @@
 
 -behaviour(gen_server).
 -define(SERVER, ?MODULE).
+
+-define(LOG_THRESHOLD, 0.8).
 
 
 -record(queue_monitor_state, {
@@ -118,12 +117,8 @@
                 sync_response_process = undefined
                }).
 
-% exchange is /analytics, so encode the / as %2F
-% NOTE: oc_httpc client is configured to prepend /api
--define(MAX_LENGTH_PATH, "/policies/%2Fanalytics/max_length").
--define(QUEUE_LENGTH_PATH, "/queues/%2Fanalytics").
--define(LOG_THRESHOLD, 0.8).
--define(POOLNAME, rabbitmq_management_service).
+
+
 
 
 start_link() ->
@@ -175,20 +170,6 @@ stop_timer() ->
     gen_server:call(?SERVER, stop_timer).
 
 
-%% oc_httpc pool functions --------------------------------------------
-create_pool() ->
-    Pools = get_pool_configs(),
-    [oc_httpc:add_pool(PoolNameAtom, Config) || {PoolNameAtom, Config} <- Pools, Config /= []],
-    ok.
-
-delete_pool() ->
-    Pools = get_pool_configs(),
-    [ok = oc_httpc:delete_pool(PoolNameAtom) || {PoolNameAtom, _Config} <- Pools],
-    ok.
-
-get_pool_configs() ->
-    Config = envy:get(oc_chef_wm, ?POOLNAME, [], any),
-    [{?POOLNAME, Config}].
 
 %%-------------------------------------------------------------
 
@@ -214,7 +195,9 @@ handle_call(status, _From, State) ->
              {dropped_since_last_check, State#queue_monitor_state.dropped_since_last_check},
              {max_length, State#queue_monitor_state.max_length},
              {last_recorded_length, State#queue_monitor_state.last_recorded_length},
-             {total_dropped, State#queue_monitor_state.total_dropped}],
+             {total_dropped, State#queue_monitor_state.total_dropped}
+             %{mailbox_length, erlang:process_info(self(), message_queue_len)}
+            ],
     {reply, Stats, State};
 handle_call(sync_check_current_state, From, #queue_monitor_state{sync_response_process = undefined} = State) ->
      self() ! status_ping,
@@ -297,7 +280,7 @@ handle_info(Info, State) ->
 terminate(_Reason, #queue_monitor_state{timer=undefined}) ->
     ok;
 terminate(_Reason, #queue_monitor_state{timer=Timer}) ->
-    {ok, cancel} = timer:cancel(Timer),
+    timer:cancel(Timer),
     ok.
 
 
@@ -319,7 +302,7 @@ start_update_timer() ->
 % the gen_server via check_current_queue_length
 -spec check_current_queue_state(pid(), integer()) -> ok.
 check_current_queue_state(ParentPid, DroppedSinceLastCheck) ->
-    case get_max_length() of
+    case chef_wm_rabbitmq_management:get_max_length() of
         undefined -> ok;
                      % max length isn't configured, or something is broken
                      % don't continue.
@@ -334,7 +317,7 @@ check_current_queue_state(ParentPid, DroppedSinceLastCheck) ->
 % the gen_server via ParentPid ! Message
 -spec check_current_queue_length(pid(), integer(), integer()) -> ok.
 check_current_queue_length(ParentPid, MaxLength, DroppedSinceLastCheck) ->
-    CurrentLength = get_current_length(),
+    CurrentLength = chef_wm_rabbitmq_management:get_current_length(),
     case CurrentLength of
         undefined ->
             % a queue doesn't appear to be bound to the /analytics
@@ -345,7 +328,7 @@ check_current_queue_length(ParentPid, MaxLength, DroppedSinceLastCheck) ->
         N ->
                 lager:debug("Queue Monitor current length = ~p", [N]),
                 QueueAtCapacity = CurrentLength == MaxLength,
-                {Ratio, Pcnt} = calc_ratio_and_percent(CurrentLength, MaxLength),
+                {Ratio, Pcnt} = chef_wm_rabbitmq_management:calc_ratio_and_percent(CurrentLength, MaxLength),
                 case Ratio >= ?LOG_THRESHOLD of
                     true ->
                         lager:warning("Queue Monitor has detected RabbitMQ capacity at ~p%", [Pcnt]);
@@ -364,110 +347,4 @@ check_current_queue_length(ParentPid, MaxLength, DroppedSinceLastCheck) ->
     end.
 
 
--spec calc_ratio_and_percent(integer(), integer()) -> {float(), float()}.
-calc_ratio_and_percent(0, _MaxLength) ->
-    {0.0, 0.0};
-%% the max_length policy should ensure that CurrentLength <= MaxLength,
-%% but return 100% full if this ever happens
-calc_ratio_and_percent(CurrentLength, MaxLength) when CurrentLength > MaxLength ->
-    {1.0, 100.0};
-calc_ratio_and_percent(CurrentLength, MaxLength) ->
-    Ratio = CurrentLength / MaxLength,
-    Pcnt = round(Ratio * 100.0),
-    {Ratio, Pcnt}.
-
--spec rabbit_mgmt_server_request(string()) -> oc_httpc:response().
-rabbit_mgmt_server_request(Path) ->
-    oc_httpc:request(?POOLNAME, Path, [], get, []).
-
-
-% make an http connection to the rabbitmq management console
-% and return a integer value or undefined
--spec get_max_length() -> integer() | undefined.
-get_max_length() ->
-    MaxResult = rabbit_mgmt_server_request(?MAX_LENGTH_PATH),
-    case MaxResult of
-        {ok, "200", _, MaxLengthJson} ->
-            parse_max_length_response(MaxLengthJson);
-        {error, {conn_failed,_}} ->
-            lager:info("Can't connect to RabbitMQ management console"),
-            undefined;
-        {ok, "404", _, _} ->
-            lager:info("RabbitMQ max-length policy not set"),
-            undefined;
-        Resp ->
-            lager:error("Unknown response from RabbitMQ management console: ~p", [Resp]),
-            undefined
-
-    end.
-
-% make an http connection to the rabbitmq management console
-% and return a integer value or undefined
--spec get_current_length() -> integer() | undefined.
-get_current_length() ->
-    CurrentResult = rabbit_mgmt_server_request(?QUEUE_LENGTH_PATH),
-    case CurrentResult of
-        {error, {conn_failed,_}} ->
-            lager:info("Can't connect to RabbitMQ management console"),
-            undefined;
-        {ok, "200", _, CurrentStatusJson} ->
-            parse_current_length_response(CurrentStatusJson);
-        {ok, "404", _, _} ->
-            lager:info("Queue not bound in /analytics exchange"),
-            undefined;
-        Resp ->
-            lager:error("Unknown response from RabbitMQ management console: ~p", [Resp]),
-            undefined
-    end.
-
-% NOTE: oc_httpc:responseBody() :: string() | {file, filename()}.
-% reach into the JSON returned from the RabbitMQ management console
-% and return a current length value, OR undefined if unavailable or
-% unparseable. EJ was not convenient for parsing this data.
--spec parse_current_length_response(binary() | {file, oc_httpc:filename()}) -> integer() | undefined.
-parse_current_length_response(Message) ->
-    try
-        CurrentJSON = jiffy:decode(Message),
-        % make a proplists of each queue and it's current length
-        QueueLengths =
-            lists:map(fun (QueueStats) -> {QS} = QueueStats,
-                                        {proplists:get_value(<<"name">>, QS),
-                                        proplists:get_value(<<"messages">>, QS)}
-                    end, CurrentJSON),
-        % look for the alaska queue length
-        parse_integer(proplists:get_value(<<"alaska">>, QueueLengths, undefined))
-    catch
-        Error:Rsn ->
-            lager:error("Invalid RabbitMQ response while getting queue length ~p ~p",
-                                 [Error, Rsn]),
-            undefined
-    end.
-
-% NOTE: oc_httpc:responseBody() :: string() | {file, filename()}.
-% reach into the JSON returned from the RabbitMQ management console
-% and return the max_length value, OR undefined if unavailable or
-% unparseable. EJ was not convenient for parsing this data.
--spec parse_max_length_response(binary() | {file, oc_httpc:filename()}) -> integer() | undefined.
-parse_max_length_response(Message) ->
-    try
-        {MaxLengthPolicy} = jiffy:decode(Message),
-        {Defs} = proplists:get_value(<<"definition">>, MaxLengthPolicy),
-        parse_integer(proplists:get_value(<<"max-length">>, Defs, undefined))
-    catch
-        Error:Rsn->
-            lager:error("Invalid RabbitMQ response while getting queue max length ~p ~p",
-                        [Error, Rsn]),
-            undefined
-    end.
-
-
--spec parse_integer(any()) -> integer | undefined.
-parse_integer(Val) when is_integer(Val) ->
-    Val;
-parse_integer(Val) when is_list(Val) ->
-    case string:to_integer(Val) of
-        {error, _Reason} -> undefined;
-        {Int, _Rest} -> Int
-    end;
-parse_integer(_) -> undefined.
 

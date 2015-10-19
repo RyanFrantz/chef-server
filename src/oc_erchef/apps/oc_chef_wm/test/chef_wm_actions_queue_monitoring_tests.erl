@@ -45,35 +45,35 @@
 
 parse_max_length_test() ->
     MaxLengthJson = "{\"vhost\":\"/analytics\",\"name\":\"max_length\",\"pattern\":\"(erchef|alaska|notifier.notifications|notifier_config)\",\"apply-to\":\"queues\",\"definition\":{\"max-length\":10},\"priority\":0}",
-    Result = chef_wm_actions_queue_monitoring:parse_max_length_response(MaxLengthJson),
+    Result = chef_wm_rabbitmq_management:parse_max_length_response(MaxLengthJson),
     ?assertEqual(10, Result).
 
 parse_max_length_invalid_json_test() ->
     MaxLengthJson = "{abc",
-    Result = chef_wm_actions_queue_monitoring:parse_max_length_response(MaxLengthJson),
+    Result = chef_wm_rabbitmq_management:parse_max_length_response(MaxLengthJson),
     ?assertEqual(undefined, Result).
 
 
 parse_current_length_no_queue_test() ->
     NoQueueJson = "[]",
-    Result = chef_wm_actions_queue_monitoring:parse_current_length_response(NoQueueJson),
+    Result = chef_wm_rabbitmq_management:parse_current_length_response(NoQueueJson),
     ?assertEqual(undefined, Result).
 
 
 parse_current_length_no_messages_test() ->
-    Result = chef_wm_actions_queue_monitoring:parse_current_length_response(no_messages_json()),
+    Result = chef_wm_rabbitmq_management:parse_current_length_response(no_messages_json()),
     ?assertEqual(0, Result).
 
 
 parse_current_length_invalid_json_test() ->
     Json = "{abc",
-    Result = chef_wm_actions_queue_monitoring:parse_current_length_response(Json),
+    Result = chef_wm_rabbitmq_management:parse_current_length_response(Json),
     ?assertEqual(undefined, Result).
 
 
 parse_current_length_some_messages_test() ->
     Result =
-    chef_wm_actions_queue_monitoring:parse_current_length_response(some_message_json()),
+    chef_wm_rabbitmq_management:parse_current_length_response(some_message_json()),
     ?assertEqual(7, Result).
 
 
@@ -84,7 +84,7 @@ percentage_test() ->
 prop_calc_ratio_and_percent() ->
     ?FORALL({X, Y}, {pos_integer(), pos_integer()},
                 begin
-                    {Ratio, Percent} = chef_wm_actions_queue_monitoring:calc_ratio_and_percent(X, Y),
+                    {Ratio, Percent} = chef_wm_rabbitmq_management:calc_ratio_and_percent(X, Y),
                     Ratio >= 0.0 andalso
                     Ratio =< 1.0 andalso
                     Percent >= 0.0 andalso
@@ -97,7 +97,7 @@ parse_integer_test() ->
 
 prop_parse_integer() ->
     ?FORALL(X, any(),
-            case chef_wm_actions_queue_monitoring:parse_integer(X) of
+            case chef_wm_rabbitmq_management:parse_integer(X) of
                 Y when is_integer(Y) -> true;
                 Z -> Z == undefined
             end).
