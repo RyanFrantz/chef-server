@@ -62,7 +62,7 @@
 -compile(export_all).
 -endif.
 
--export([start_link/2,
+-export([start_link/4,
          init/1,
          handle_call/3,
          handle_cast/2,
@@ -74,7 +74,7 @@
          is_queue_at_capacity/0,
          message_dropped/0,
          override_queue_at_capacity/1,
-         sync_check_current_state/0,
+         sync_status_ping/0,
          start_timer/0,
          stop_timer/0
 
@@ -83,7 +83,6 @@
 -behaviour(gen_server).
 -define(SERVER, ?MODULE).
 
--define(LOG_THRESHOLD, 0.8).
 
 -define(VHOST, "%2Fanalytics").
 -define(QUEUE, <<"alaska">>).
@@ -126,7 +125,7 @@
                 % process.
                 worker_process = undefined,
 
-                % if sync_check_current_state/0 is called, this is the Pid of the
+                % if sync_status_ping/0 is called, this is the Pid of the
                 % calling process. This is recorded because checking the queue
                 % length and max is async via the worker_process, and the
                 % reply is sent back to this Pid via gen_server:reply()
@@ -140,8 +139,11 @@
 %start_link() ->
 %    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
-start_link(Vhost, Queue) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [Vhost, Queue], []).
+start_link(Vhost, Queue, MaxLength, CurrentLength) ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [Vhost,
+                                                      Queue,
+                                                      MaxLength,
+                                                      CurrentLength], []).
 
 -spec status() -> [{atom(), _}].
 status() ->
@@ -175,8 +177,8 @@ stop() ->
 
 %% Support functions --------------------------------------------
 % Synchronously update state by pinging the RabbitMQ Management Console
-sync_check_current_state() ->
-    gen_server:call(?SERVER, sync_check_current_state).
+sync_status_ping() ->
+    gen_server:call(?SERVER, sync_status_ping).
 
 % manually toggle the at capacity flag
 override_queue_at_capacity(AtCapacity) ->
@@ -191,14 +193,16 @@ stop_timer() ->
 
 
 %%-------------------------------------------------------------
-init([Vhost, Queue]) ->
+init([Vhost, Queue, MaxLength, CurrentLength]) ->
     % used to catch worker msgs
     process_flag(trap_exit, true),
     TRef = start_update_timer(),
     {ok, #queue_monitor_state{timer=TRef,
                               worker_process = undefined,
                               vhost_to_monitor = Vhost,
-                              queue_to_monitor = Queue}}.
+                              queue_to_monitor = Queue,
+                              max_length = MaxLength,
+                              last_recorded_length = CurrentLength}}.
 
 %%-------------------------------------------------------------
 %% CALLS
@@ -219,7 +223,7 @@ handle_call(status, _From, State) ->
              %{mailbox_length, erlang:process_info(self(), message_queue_len)}
             ],
     {reply, Stats, State};
-handle_call(sync_check_current_state, From, #queue_monitor_state{sync_response_process = undefined} = State) ->
+handle_call(sync_status_ping, From, #queue_monitor_state{sync_response_process = undefined} = State) ->
      self() ! status_ping,
      {noreply, State#queue_monitor_state{sync_response_process = From}};
 handle_call(stop, _From, State) ->
@@ -255,14 +259,15 @@ handle_cast(Msg, State) ->
 
 %%-------------------------------------------------------------
 %% INFO
-handle_info(reset_dropped_since_last_check, State) ->
-    {noreply,State#queue_monitor_state{dropped_since_last_check = 0}};
+handle_info({MaxLength, reset_dropped_since_last_check}, State) ->
+    {noreply,State#queue_monitor_state{max_length = MaxLength,
+                                       dropped_since_last_check = 0}};
 handle_info({'EXIT', From, Reason}, #queue_monitor_state{worker_process = WorkerPid,
                                            sync_response_process = SyncPid} = State) ->
     % Check to see if the EXIT came from our worker
     case From == WorkerPid of
         true ->
-              % check if we need to reply to a sync_check_current_state() call
+              % check if we need to reply to a sync_status_ping() call
               case SyncPid of
                   undefined -> ok;
                   Pid -> gen_server:reply(Pid, ok)
@@ -293,10 +298,11 @@ handle_info(status_ping, #queue_monitor_state{
     ParentPid = self(),
     Pid = spawn_link(
             fun () ->
-                    check_current_queue_state(Vhost,
-                                              Queue,
-                                              ParentPid,
-                                              Dropped)
+                    Result =
+                      chef_wm_rabbitmq_management:check_current_queue_state(Vhost,
+                                                                            Queue,
+                                                                            Dropped),
+                    ParentPid ! Result
             end),
     {noreply, State#queue_monitor_state{worker_process=Pid}};
 handle_info(status_ping, State) ->
@@ -327,57 +333,7 @@ start_update_timer() ->
     {ok, TRef} = timer:send_interval(Interval, status_ping),
     TRef.
 
-% this function just returns ok, as a return value is communicated back to
-% the gen_server via check_current_queue_length
--spec check_current_queue_state(string(), string(), pid(), integer()) -> ok.
-check_current_queue_state(Vhost, Queue, ParentPid, DroppedSinceLastCheck) ->
-    case chef_wm_rabbitmq_management:get_max_length(Vhost) of
-        undefined -> ok;
-                     % max length isn't configured, or something is broken
-                     % don't continue.
-                     %
-        MaxLength ->
-            lager:debug("Queue Monitor max length = ~p", [MaxLength]),
-            check_current_queue_length(Vhost,
-                                       Queue,
-                                       ParentPid,
-                                       MaxLength,
-                                       DroppedSinceLastCheck)
-    end.
 
-% this function just returns ok, as a return value is communicated back to
-% the gen_server via ParentPid ! Message
--spec check_current_queue_length(string(), string(), pid(), integer(), integer()) -> ok.
-check_current_queue_length(Vhost, Queue, ParentPid, MaxLength, DroppedSinceLastCheck) ->
-    CurrentLength =
-    chef_wm_rabbitmq_management:get_current_length(Vhost, Queue),
-    case CurrentLength of
-        undefined ->
-            % a queue doesn't appear to be bound to the /analytics
-            % exchange. The only thing we can do is reset the
-            % dropped_since_last_check value to 0
-            ParentPid ! reset_dropped_since_last_check,
-            ok;
-        N ->
-                lager:debug("Queue Monitor current length = ~p", [N]),
-                QueueAtCapacity = CurrentLength == MaxLength,
-                {Ratio, Pcnt} = chef_wm_rabbitmq_management:calc_ratio_and_percent(CurrentLength, MaxLength),
-                case Ratio >= ?LOG_THRESHOLD of
-                    true ->
-                        lager:warning("Queue Monitor has detected RabbitMQ capacity at ~p%", [Pcnt]);
-                    false -> ok
-                end,
-                case QueueAtCapacity of
-                    true ->
-                        lager:warning("Queue Monitor has dropped ~p messages since last check due to queue limit exceeded",
-                                        [DroppedSinceLastCheck]);
-                    false -> ok
-                end,
-                % successfully checked max length and current length
-                % update the state of the gen_server
-                ParentPid ! {MaxLength, N,QueueAtCapacity},
-                ok
-    end.
 
 
 

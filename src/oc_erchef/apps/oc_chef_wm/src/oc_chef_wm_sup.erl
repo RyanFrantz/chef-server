@@ -84,19 +84,34 @@ init([]) ->
 
 maybe_start_action(true, Workers) ->
     lager:info("Starting oc_chef_action", []),
-    %case envy:get(oc_chef_wm, rabbitmq_queue_length_monitor_enabled, false, boolean) of
-    io:format(user, "WARNING WARNING WARNING OVERRIDE~n", []),
-    case false of
+
+    %% TODO: read these in somewhere
+    Vhost = "%2Fanalytics",
+    Queue = <<"alaska">>,
+
+    case envy:get(oc_chef_wm, rabbitmq_queue_length_monitor_enabled, false, boolean) of
         true ->
-            chef_wm_rabbitmq_management:create_pool(),
+            {MaxLength, CurrentLength, QueueAtCapacity} =
+                chef_wm_rabbitmq_management:sync_check_queue_at_capacity(Vhost, Queue),
+            case QueueAtCapacity of
+                true ->
+                    lager:critical("Vhost ~p, queue ~p at capacity, cannot start", [Vhost, Queue]),
+                    ok;
+                false ->
+                    lager:info("Vhost ~p, queue ~p not at capacity", [Vhost, Queue]),
+                    ok
+            end,
             ActionQueueMonitoringSpec = {chef_wm_actions_queue_monitoring,
-                    {chef_wm_actions_queue_monitoring, start_link, ["%2Fanalytics", <<"alaska">>]},
+                    {chef_wm_actions_queue_monitoring, start_link,
+                     [Vhost, Queue, MaxLength, CurrentLength]},
                         permanent, 5000, worker, [chef_wm_actions_queue_monitoring]},
             lager:info("Starting actions queue monitoring"),
             [ActionQueueMonitoringSpec | [ amqp_child_spec() | Workers]];
         false ->
             [ amqp_child_spec() | Workers]
     end;
+
+
 
 maybe_start_action(false, Workers) ->
     lager:info("Not starting Actionlog supervisor since actionlog is disabled."),

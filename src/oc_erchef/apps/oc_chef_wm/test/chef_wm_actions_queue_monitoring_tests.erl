@@ -33,6 +33,15 @@
                         {last_recorded_length,0},
                         {total_dropped,0}] ).
 
+%% same as EMPTY_STATE with max_length set
+-define(MAX_SET_STATUS,  [{queue_at_capacity,false},
+                          {dropped_since_last_check,0},
+                          {max_length,99},
+                          {last_recorded_length,0},
+                          {total_dropped,0}] ).
+
+
+
 -define(ROUTING_KEY, <<"MyRoutingKey">>).
 -define(MESSAGE, <<"MyMessage">>).
 
@@ -135,7 +144,8 @@ queue_length_test_() ->
               application:set_env(oc_chef_wm, actions_host, "localhost"),
               application:set_env(oc_chef_wm, rabbitmq_management_password, <<"bar">>),
               application:set_env(oc_chef_wm, rabbitmq_management_port, 15672),
-              {ok, _QMPid} = chef_wm_actions_queue_monitoring:start_link(?VHOST, ?QUEUE_NAME)
+              {ok, _QMPid} =
+              chef_wm_actions_queue_monitoring:start_link(?VHOST, ?QUEUE_NAME, 0, 0)
      end,
      fun(_) ->
              catch(chef_wm_actions_queue_monitoring:stop()),
@@ -146,7 +156,7 @@ queue_length_test_() ->
        fun() ->
             % maximum length has been set, no state should be changed
             meck_response("404", "", "404", ""),
-            chef_wm_actions_queue_monitoring:sync_check_current_state(),
+            chef_wm_actions_queue_monitoring:sync_status_ping(),
 
             %% checking max_length returns [], so state should be "empty"
             ?assertMatch(?EMPTY_STATUS, chef_wm_actions_queue_monitoring:status())
@@ -156,8 +166,8 @@ queue_length_test_() ->
             % maximum length has been configured, however a queue isn't bound
             % to the /analytics exchange
             meck_response("200", max_length_json(), "404", ""),
-            chef_wm_actions_queue_monitoring:sync_check_current_state(),
-            ?assertMatch(?EMPTY_STATUS, chef_wm_actions_queue_monitoring:status())
+            chef_wm_actions_queue_monitoring:sync_status_ping(),
+            ?assertMatch(?MAX_SET_STATUS, chef_wm_actions_queue_monitoring:status())
        end},
       {"max_length_set_queue_bound_no_messages",
        fun() ->
@@ -165,7 +175,7 @@ queue_length_test_() ->
           % no messages are available to read
 
           meck_response("200",  max_length_json(), "200", no_messages_json()),
-          chef_wm_actions_queue_monitoring:sync_check_current_state(),
+          chef_wm_actions_queue_monitoring:sync_status_ping(),
 
           ?assertMatch([{queue_at_capacity,false},
                                 {dropped_since_last_check,0},
@@ -179,7 +189,7 @@ queue_length_test_() ->
            % maximum length has been configured, a queue is bound to the exchange.
             % 7 messages are available to read
             meck_response("200", max_length_json(), "200", some_message_json()),
-            chef_wm_actions_queue_monitoring:sync_check_current_state(),
+            chef_wm_actions_queue_monitoring:sync_status_ping(),
 
             ?assertMatch([{queue_at_capacity,false},
                            {dropped_since_last_check,0},
@@ -195,7 +205,7 @@ queue_length_test_() ->
          % 7 messages are available to read
          % 2 messages will be dropped
         meck_response("200", max_length_json(), "200", some_message_json()),
-            chef_wm_actions_queue_monitoring:sync_check_current_state(),
+            chef_wm_actions_queue_monitoring:sync_status_ping(),
 
             chef_wm_actions_queue_monitoring:message_dropped(),
             chef_wm_actions_queue_monitoring:message_dropped(),
@@ -215,12 +225,12 @@ queue_length_test_() ->
             % 2 messages will be dropped
             % recheck queue status which clears dropped_since_last_check
             meck_response("200", max_length_json(), "200", some_message_json()),
-                chef_wm_actions_queue_monitoring:sync_check_current_state(),
+                chef_wm_actions_queue_monitoring:sync_status_ping(),
 
                 chef_wm_actions_queue_monitoring:message_dropped(),
                 chef_wm_actions_queue_monitoring:message_dropped(),
-                %% calling sync_check_current_state() will set the dropped_since_last_check to 0
-                chef_wm_actions_queue_monitoring:sync_check_current_state(),
+                %% calling sync_status_ping() will set the dropped_since_last_check to 0
+                chef_wm_actions_queue_monitoring:sync_status_ping(),
                 ?assertMatch([{queue_at_capacity,false},
                                     {dropped_since_last_check,0},
                                     {max_length,99},
@@ -235,7 +245,7 @@ queue_length_test_() ->
             % 99 messages are available to read
             % 2 messages will be dropped
             meck_response("200", max_length_json(), "200", at_capacity_json()),
-                chef_wm_actions_queue_monitoring:sync_check_current_state(),
+                chef_wm_actions_queue_monitoring:sync_status_ping(),
 
                 chef_wm_actions_queue_monitoring:message_dropped(),
                 chef_wm_actions_queue_monitoring:message_dropped(),
@@ -255,12 +265,12 @@ queue_length_test_() ->
             % 2 messages will be dropped
             % recheck queue status which clears dropped_since_last_check
             meck_response("200", max_length_json(), "200", at_capacity_json()),
-            chef_wm_actions_queue_monitoring:sync_check_current_state(),
+            chef_wm_actions_queue_monitoring:sync_status_ping(),
 
             chef_wm_actions_queue_monitoring:message_dropped(),
             chef_wm_actions_queue_monitoring:message_dropped(),
 
-            chef_wm_actions_queue_monitoring:sync_check_current_state(),
+            chef_wm_actions_queue_monitoring:sync_status_ping(),
 
             ?assertMatch([{queue_at_capacity,true},
                                     {dropped_since_last_check,0},
@@ -297,7 +307,7 @@ queue_length_test_() ->
             meck_response("200", max_length_json(), "200", at_capacity_json()),
             %% ensure that the queue is at capacity before calling
             %% oc_chef_action:publish
-            chef_wm_actions_queue_monitoring:sync_check_current_state(),
+            chef_wm_actions_queue_monitoring:sync_status_ping(),
 
             meck:new(oc_chef_action_queue),
             meck:expect(oc_chef_action_queue, publish, fun (_, _) -> ok end),
@@ -330,7 +340,7 @@ queue_length_test_() ->
             meck_response("200", max_length_json(), "200", at_capacity_json()),
             %% ensure that the queue is at capacity before calling
             %% oc_chef_action:publish
-            chef_wm_actions_queue_monitoring:sync_check_current_state(),
+            chef_wm_actions_queue_monitoring:sync_status_ping(),
 
             meck:new(oc_chef_action_queue),
             meck:expect(oc_chef_action_queue, publish, fun (_, _) -> ok end),
@@ -350,7 +360,7 @@ queue_length_test_() ->
             %% simulate the queue length going back down to 0
             meck:unload(oc_httpc),
             meck_response("200",  max_length_json(), "200", no_messages_json()),
-            chef_wm_actions_queue_monitoring:sync_check_current_state(),
+            chef_wm_actions_queue_monitoring:sync_status_ping(),
 
             oc_chef_action:publish(?ROUTING_KEY, ?MESSAGE),
 
@@ -375,7 +385,7 @@ queue_length_test_() ->
           meck_response("200", max_length_json(), "200", at_capacity_json()),
           %% ensure that the queue is at capacity before calling
           %% oc_chef_action:publish
-          chef_wm_actions_queue_monitoring:sync_check_current_state(),
+          chef_wm_actions_queue_monitoring:sync_status_ping(),
 
           meck:new(oc_chef_action_queue),
           meck:expect(oc_chef_action_queue, publish, fun (_, _) -> ok end),
@@ -422,7 +432,7 @@ queue_length_test_() ->
        fun() ->
             % manually set the queue capacity
             meck_response("200", max_length_json(), "200", no_messages_json()),
-            chef_wm_actions_queue_monitoring:sync_check_current_state(),
+            chef_wm_actions_queue_monitoring:sync_status_ping(),
             FirstStatus = chef_wm_actions_queue_monitoring:status(),
             chef_wm_actions_queue_monitoring:override_queue_at_capacity(true),
             SecondStatus = chef_wm_actions_queue_monitoring:status(),
@@ -458,7 +468,7 @@ queue_length_test_() ->
        fun() ->
           % simulate a connection failure while checking max_length
           meck_conn_failure(),
-          chef_wm_actions_queue_monitoring:sync_check_current_state(),
+          chef_wm_actions_queue_monitoring:sync_status_ping(),
           ?assertMatch(?EMPTY_STATUS, chef_wm_actions_queue_monitoring:status())
        end},
       {"current_length_connection_fail",
@@ -474,15 +484,15 @@ queue_length_test_() ->
                  end
               end),
 
-          chef_wm_actions_queue_monitoring:sync_check_current_state(),
-          ?assertMatch(?EMPTY_STATUS, chef_wm_actions_queue_monitoring:status())
+          chef_wm_actions_queue_monitoring:sync_status_ping(),
+          ?assertMatch(?MAX_SET_STATUS, chef_wm_actions_queue_monitoring:status())
        end},
       {"max_length_unknown_response",
        fun() ->
           %% oc_httpc/ibrowse return an unknown response
           meck:new(oc_httpc),
           meck:expect(oc_httpc, request, fun(_, _Path, _, _, _) -> foo end),
-          chef_wm_actions_queue_monitoring:sync_check_current_state(),
+          chef_wm_actions_queue_monitoring:sync_status_ping(),
           ?assertMatch(?EMPTY_STATUS, chef_wm_actions_queue_monitoring:status())
        end},
       {"current_length_unknown_response",
@@ -498,8 +508,8 @@ queue_length_test_() ->
                  end
               end),
 
-          chef_wm_actions_queue_monitoring:sync_check_current_state(),
-          ?assertMatch(?EMPTY_STATUS, chef_wm_actions_queue_monitoring:status())
+          chef_wm_actions_queue_monitoring:sync_status_ping(),
+          ?assertMatch(?MAX_SET_STATUS, chef_wm_actions_queue_monitoring:status())
        end}
      ]}.
 
@@ -522,22 +532,22 @@ process_test_() ->
      [
      {"unknown casts don't crash the gen_server",
        fun() ->
-          {ok, QMPid} = chef_wm_actions_queue_monitoring:start_link(?VHOST, ?QUEUE_NAME),
+          {ok, QMPid} = chef_wm_actions_queue_monitoring:start_link(?VHOST, ?QUEUE_NAME, 0, 0),
           gen_server:cast(chef_wm_actions_queue_monitoring, foo),
           ?assertEqual(QMPid, whereis(chef_wm_actions_queue_monitoring))
        end},
       {"unknown info doesn't crash the gen_server",
        fun() ->
-          {ok, QMPid} = chef_wm_actions_queue_monitoring:start_link(?VHOST, ?QUEUE_NAME),
+          {ok, QMPid} = chef_wm_actions_queue_monitoring:start_link(?VHOST, ?QUEUE_NAME, 0, 0),
           QMPid ! foo,
           ?assertEqual(QMPid, whereis(chef_wm_actions_queue_monitoring))
        end},
 
       {"unknown_process_exit",
        fun() ->
-          {ok, QMPid} = chef_wm_actions_queue_monitoring:start_link(?VHOST, ?QUEUE_NAME),
+          {ok, QMPid} = chef_wm_actions_queue_monitoring:start_link(?VHOST, ?QUEUE_NAME, 0, 0),
           % send a random EXIT signal to the queue monitor, it shouldn't crash
-          chef_wm_actions_queue_monitoring:sync_check_current_state(),
+          chef_wm_actions_queue_monitoring:sync_status_ping(),
           {interval, _} = TimerBefore = erlang:element(5, sys:get_state(chef_wm_actions_queue_monitoring)),
           QMPid ! {'EXIT', foo, bar},
           ?assertEqual(QMPid, whereis(chef_wm_actions_queue_monitoring)),

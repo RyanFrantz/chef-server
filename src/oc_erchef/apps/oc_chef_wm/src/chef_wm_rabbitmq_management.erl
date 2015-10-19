@@ -9,11 +9,20 @@
          get_current_length/2,
          create_pool/0,
          delete_pool/0,
-         get_pool_configs/0
+         get_pool_configs/0,
+         check_current_queue_state/3,
+         check_current_queue_length/4,
+         sync_check_queue_at_capacity/2
         ]).
 
 
 -define(POOLNAME, rabbitmq_management_service).
+-define(LOG_THRESHOLD, 0.8).
+
+-type max_length() :: integer().
+-type current_length() :: integer().
+-type queue_at_capacity() :: boolean.
+
 
 % NOTE: oc_httpc client is configured to prepend /api
 
@@ -80,7 +89,7 @@ get_max_length(Vhost) ->
 
 % make an http connection to the rabbitmq management console
 % and return a integer value or undefined
--spec get_current_length(string(), string()) -> integer() | undefined.
+-spec get_current_length(string(), binary()) -> integer() | undefined.
 get_current_length(Vhost, Queue) ->
     CurrentResult = rabbit_mgmt_server_request(mk_current_length_path(Vhost)),
     case CurrentResult of
@@ -102,7 +111,7 @@ get_current_length(Vhost, Queue) ->
 % and return a current length value, OR undefined if unavailable or
 % unparseable. EJ was not convenient for parsing this data.
 -spec parse_current_length_response(binary() | {file, oc_httpc:filename()},
-                                    string()) -> integer() | undefined.
+                                    binary()) -> integer() | undefined.
 parse_current_length_response(Message, Queue) ->
     try
         CurrentJSON = jiffy:decode(Message),
@@ -136,6 +145,68 @@ parse_max_length_response(Message) ->
             lager:error("Invalid RabbitMQ response while getting queue max length ~p ~p",
                         [Error, Rsn]),
             undefined
+    end.
+
+
+-spec sync_check_queue_at_capacity(string(), binary()) -> {integer(), integer(), boolean()}.
+sync_check_queue_at_capacity(Vhost, Queue) ->
+    Result = check_current_queue_state(Vhost, Queue, 0),
+    case Result of
+      skipped  -> {0, 0, false};
+      {MaxLength, reset_dropped_since_last_check} -> {MaxLength, 0, false};
+      {MaxLength, N,QueueAtCapacity} -> {MaxLength, N, QueueAtCapacity}
+    end.
+
+
+
+-spec check_current_queue_state(string(), string(), integer()) ->
+                                                skipped |
+                                                {max_length(), reset_dropped_since_last_check} |
+                                                {max_length(), current_length(), queue_at_capacity()}.
+check_current_queue_state(Vhost, Queue, DroppedSinceLastCheck) ->
+    case chef_wm_rabbitmq_management:get_max_length(Vhost) of
+        undefined -> skipped;
+                     % max length isn't configured, or something is broken
+                     % don't continue.
+        MaxLength ->
+            lager:debug("Queue Monitor max length = ~p", [MaxLength]),
+            check_current_queue_length(Vhost,
+                                       Queue,
+                                       MaxLength,
+                                       DroppedSinceLastCheck)
+    end.
+
+-spec check_current_queue_length(string(), binary(), integer(), integer()) ->
+                                                {max_length(), reset_dropped_since_last_check} |
+                                                {max_length(), current_length(), queue_at_capacity()}.
+check_current_queue_length(Vhost, Queue, MaxLength, DroppedSinceLastCheck) ->
+    CurrentLength =
+    chef_wm_rabbitmq_management:get_current_length(Vhost, Queue),
+    case CurrentLength of
+        undefined ->
+            % a queue doesn't appear to be bound to the /analytics
+            % exchange. The only thing we can do is reset the
+            % dropped_since_last_check value to 0
+            {MaxLength, reset_dropped_since_last_check};
+        N ->
+                lager:debug("Queue Monitor current length = ~p for VHost ~p and Queue ~p", [N, Vhost, Queue]),
+                QueueAtCapacity = CurrentLength == MaxLength,
+                {Ratio, Pcnt} = chef_wm_rabbitmq_management:calc_ratio_and_percent(CurrentLength, MaxLength),
+                case Ratio >= ?LOG_THRESHOLD of
+                    true ->
+                        lager:warning("Queue Monitor has detected RabbitMQ for VHost ~p, queue ~p capacity at ~p%",
+                                      [Vhost, Queue, Pcnt]);
+                    false -> ok
+                end,
+                case QueueAtCapacity of
+                    true ->
+                        lager:warning("Queue Monitor has dropped ~p messages for VHost ~p, queue ~p since last check due to queue limit exceeded",
+                                        [DroppedSinceLastCheck, Vhost, Queue]);
+                    false -> ok
+                end,
+                % successfully checked max length and current length
+                % update the state of the gen_server
+                {MaxLength, N,QueueAtCapacity}
     end.
 
 
