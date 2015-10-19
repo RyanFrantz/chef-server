@@ -35,11 +35,15 @@
 -record(state, {total_dropped = 0,
                 dropped_since_last_check = 0}).
 
+
+-define(VHOST, "%2Fanalytics").
+-define(QUEUE_NAME, <<"alaska">>).
+
 queue_monitor_prop() ->
     ?FORALL(Commands, commands(?MODULE),
 	    begin
             application:set_env(oc_chef_wm, rabbitmq_queue_length_monitor_millis, 60000),
-            chef_wm_actions_queue_monitoring:start_link(),
+            chef_wm_actions_queue_monitoring:start_link(?VHOST, ?QUEUE_NAME),
             chef_wm_actions_queue_monitoring:stop_timer(),
             {H,S,Res} = run_commands(?MODULE, Commands),
             clean_up(),

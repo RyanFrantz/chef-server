@@ -84,11 +84,13 @@ init([]) ->
 
 maybe_start_action(true, Workers) ->
     lager:info("Starting oc_chef_action", []),
-    case envy:get(oc_chef_wm, rabbitmq_queue_length_monitor_enabled, false, boolean) of
+    %case envy:get(oc_chef_wm, rabbitmq_queue_length_monitor_enabled, false, boolean) of
+    io:format(user, "WARNING WARNING WARNING OVERRIDE~n", []),
+    case false of
         true ->
-            chef_wm_rabbimq_management:create_pool(),
+            chef_wm_rabbitmq_management:create_pool(),
             ActionQueueMonitoringSpec = {chef_wm_actions_queue_monitoring,
-                    {chef_wm_actions_queue_monitoring, start_link, []},
+                    {chef_wm_actions_queue_monitoring, start_link, ["%2Fanalytics", <<"alaska">>]},
                         permanent, 5000, worker, [chef_wm_actions_queue_monitoring]},
             lager:info("Starting actions queue monitoring"),
             [ActionQueueMonitoringSpec | [ amqp_child_spec() | Workers]];

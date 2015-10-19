@@ -5,8 +5,8 @@
 -endif.
 
 -export([calc_ratio_and_percent/2,
-         get_max_length/0,
-         get_current_length/0,
+         get_max_length/1,
+         get_current_length/2,
          create_pool/0,
          delete_pool/0,
          get_pool_configs/0
@@ -15,10 +15,7 @@
 
 -define(POOLNAME, rabbitmq_management_service).
 
-% exchange is /analytics, so encode the / as %2F
 % NOTE: oc_httpc client is configured to prepend /api
--define(MAX_LENGTH_PATH, "/policies/%2Fanalytics/max_length").
--define(QUEUE_LENGTH_PATH, "/queues/%2Fanalytics").
 
 %% oc_httpc pool functions --------------------------------------------
 create_pool() ->
@@ -53,12 +50,19 @@ calc_ratio_and_percent(CurrentLength, MaxLength) ->
 rabbit_mgmt_server_request(Path) ->
     oc_httpc:request(?POOLNAME, Path, [], get, []).
 
+-spec mk_max_length_path(string()) -> string().
+mk_max_length_path(Vhost) ->
+    lists:flatten(io_lib:format("/policies/~s/max_length", [Vhost])).
+
+-spec mk_current_length_path(string()) -> string().
+mk_current_length_path(Vhost) ->
+    lists:flatten(io_lib:format("/queues/~s", [Vhost])).
 
 % make an http connection to the rabbitmq management console
 % and return a integer value or undefined
--spec get_max_length() -> integer() | undefined.
-get_max_length() ->
-    MaxResult = rabbit_mgmt_server_request(?MAX_LENGTH_PATH),
+-spec get_max_length(string()) -> integer() | undefined.
+get_max_length(Vhost) ->
+    MaxResult = rabbit_mgmt_server_request(mk_max_length_path(Vhost)),
     case MaxResult of
         {ok, "200", _, MaxLengthJson} ->
             parse_max_length_response(MaxLengthJson);
@@ -76,15 +80,15 @@ get_max_length() ->
 
 % make an http connection to the rabbitmq management console
 % and return a integer value or undefined
--spec get_current_length() -> integer() | undefined.
-get_current_length() ->
-    CurrentResult = rabbit_mgmt_server_request(?QUEUE_LENGTH_PATH),
+-spec get_current_length(string(), string()) -> integer() | undefined.
+get_current_length(Vhost, Queue) ->
+    CurrentResult = rabbit_mgmt_server_request(mk_current_length_path(Vhost)),
     case CurrentResult of
         {error, {conn_failed,_}} ->
             lager:info("Can't connect to RabbitMQ management console"),
             undefined;
         {ok, "200", _, CurrentStatusJson} ->
-            parse_current_length_response(CurrentStatusJson);
+            parse_current_length_response(CurrentStatusJson, Queue);
         {ok, "404", _, _} ->
             lager:info("Queue not bound in /analytics exchange"),
             undefined;
@@ -97,8 +101,9 @@ get_current_length() ->
 % reach into the JSON returned from the RabbitMQ management console
 % and return a current length value, OR undefined if unavailable or
 % unparseable. EJ was not convenient for parsing this data.
--spec parse_current_length_response(binary() | {file, oc_httpc:filename()}) -> integer() | undefined.
-parse_current_length_response(Message) ->
+-spec parse_current_length_response(binary() | {file, oc_httpc:filename()},
+                                    string()) -> integer() | undefined.
+parse_current_length_response(Message, Queue) ->
     try
         CurrentJSON = jiffy:decode(Message),
         % make a proplists of each queue and it's current length
@@ -108,7 +113,7 @@ parse_current_length_response(Message) ->
                                         proplists:get_value(<<"messages">>, QS)}
                     end, CurrentJSON),
         % look for the alaska queue length
-        parse_integer(proplists:get_value(<<"alaska">>, QueueLengths, undefined))
+        parse_integer(proplists:get_value(Queue, QueueLengths, undefined))
     catch
         Error:Rsn ->
             lager:error("Invalid RabbitMQ response while getting queue length ~p ~p",

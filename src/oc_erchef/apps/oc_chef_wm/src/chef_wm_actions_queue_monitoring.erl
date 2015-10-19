@@ -62,8 +62,8 @@
 -compile(export_all).
 -endif.
 
--export([start_link/0]).
--export([init/1,
+-export([start_link/2,
+         init/1,
          handle_call/3,
          handle_cast/2,
          handle_info/2,
@@ -85,31 +85,47 @@
 
 -define(LOG_THRESHOLD, 0.8).
 
+-define(VHOST, "%2Fanalytics").
+-define(QUEUE, <<"alaska">>).
+
 
 -record(queue_monitor_state, {
+                % name of the rabbitmq vhost to monitor, as a string
+                vhost_to_monitor = undefined,
+
+                % name of the rabbitmq queue to monitor, as a binary
+                queue_to_monitor = undefined,
+
                 % has the max_length of the queue been reached?
                 queue_at_capacity = false,
+
                 % timer to check max and current queue length
                 timer = undefined,
+
                 % maximum queue length set by rabbitmq policy
                 % mostly static, but a user *can* change the value
                 % via rabbitmqctl
                 max_length = 0,
+
                 % last recorded length of the analytics queue
                 last_recorded_length = 0,
+
                 % number of messages that have NOT been sent to the analytics
                 % queue due to queue_at_capacity = true.
                 % This metric is manually reported by users of the queue
                 % monitor
                 dropped_since_last_check = 0,
+
                 % monotonically increasing number of messages that have NOT
                 % been sent to the analytics queue due to queue_at_capacity =
                 % true. This number is never reset.
                 total_dropped = 0,
+
                 % The async worker pid responsible for checking max length and
                 % current length of the queue. There can ONLY be ONE worker
                 % process.
                 worker_process = undefined,
+
                 % if sync_check_current_state/0 is called, this is the Pid of the
                 % calling process. This is recorded because checking the queue
                 % length and max is async via the worker_process, and the
@@ -121,8 +137,11 @@
 
 
 
-start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+%start_link() ->
+%    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+
+start_link(Vhost, Queue) ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [Vhost, Queue], []).
 
 -spec status() -> [{atom(), _}].
 status() ->
@@ -172,13 +191,14 @@ stop_timer() ->
 
 
 %%-------------------------------------------------------------
-
-init([]) ->
+init([Vhost, Queue]) ->
     % used to catch worker msgs
     process_flag(trap_exit, true),
     TRef = start_update_timer(),
-    {ok, #queue_monitor_state{timer=TRef, worker_process = undefined}}.
-
+    {ok, #queue_monitor_state{timer=TRef,
+                              worker_process = undefined,
+                              vhost_to_monitor = Vhost,
+                              queue_to_monitor = Queue}}.
 
 %%-------------------------------------------------------------
 %% CALLS
@@ -265,10 +285,19 @@ handle_info({MaxLength, N, AtCap}, State) ->
               }};
 % guard against starting more than one worker process via the
 % match to worker_process = undefined.
-handle_info(status_ping, #queue_monitor_state{worker_process = undefined,
-                                dropped_since_last_check = Dropped} = State) ->
+handle_info(status_ping, #queue_monitor_state{
+                                worker_process = undefined,
+                                dropped_since_last_check = Dropped,
+                                vhost_to_monitor = Vhost,
+                                queue_to_monitor = Queue} = State) ->
     ParentPid = self(),
-    Pid = spawn_link(fun () -> check_current_queue_state(ParentPid, Dropped) end),
+    Pid = spawn_link(
+            fun () ->
+                    check_current_queue_state(Vhost,
+                                              Queue,
+                                              ParentPid,
+                                              Dropped)
+            end),
     {noreply, State#queue_monitor_state{worker_process=Pid}};
 handle_info(status_ping, State) ->
     lager:info("Queue monitor check still running, skipping next check"),
@@ -300,24 +329,28 @@ start_update_timer() ->
 
 % this function just returns ok, as a return value is communicated back to
 % the gen_server via check_current_queue_length
--spec check_current_queue_state(pid(), integer()) -> ok.
-check_current_queue_state(ParentPid, DroppedSinceLastCheck) ->
-    case chef_wm_rabbitmq_management:get_max_length() of
+-spec check_current_queue_state(string(), string(), pid(), integer()) -> ok.
+check_current_queue_state(Vhost, Queue, ParentPid, DroppedSinceLastCheck) ->
+    case chef_wm_rabbitmq_management:get_max_length(Vhost) of
         undefined -> ok;
                      % max length isn't configured, or something is broken
                      % don't continue.
                      %
         MaxLength ->
             lager:debug("Queue Monitor max length = ~p", [MaxLength]),
-            check_current_queue_length(ParentPid, MaxLength,
+            check_current_queue_length(Vhost,
+                                       Queue,
+                                       ParentPid,
+                                       MaxLength,
                                        DroppedSinceLastCheck)
     end.
 
 % this function just returns ok, as a return value is communicated back to
 % the gen_server via ParentPid ! Message
--spec check_current_queue_length(pid(), integer(), integer()) -> ok.
-check_current_queue_length(ParentPid, MaxLength, DroppedSinceLastCheck) ->
-    CurrentLength = chef_wm_rabbitmq_management:get_current_length(),
+-spec check_current_queue_length(string(), string(), pid(), integer(), integer()) -> ok.
+check_current_queue_length(Vhost, Queue, ParentPid, MaxLength, DroppedSinceLastCheck) ->
+    CurrentLength =
+    chef_wm_rabbitmq_management:get_current_length(Vhost, Queue),
     case CurrentLength of
         undefined ->
             % a queue doesn't appear to be bound to the /analytics
